@@ -49,7 +49,7 @@ for archive_name, public_name, size in (("AppIcon60x60@2x.png", "iPhone-120.png"
         assert image.is_file(), "Expected compiled iPhone/iPad icon is missing"
         subprocess.run(["sips", "-s", "format", "bmp", str(image), "--out", str(bmp)], check=True)
     actual_pixels, expected_pixels = pixels(actual), pixels(expected)
-    assert actual_pixels[:2] == (size, size)
+    assert (actual_pixels[0], abs(actual_pixels[1])) == (size, size), f"Unexpected BMP dimensions {actual_pixels[:2]}; expected {size}x{size}"
     assert actual_pixels == expected_pixels, "Archived icon pixels do not match independently compiled approved icon"
     exported = output / public_name
     # BMP re-encoding strips the compiled PNG metadata before public inspection.
