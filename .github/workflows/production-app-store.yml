@@ -19,8 +19,8 @@ jobs:
         working-directory: app
     env:
       PRODUCTION_URL: https://colorbestie.app
-      SOURCE_COMMIT: 21fea20f02cf6996a8a05ff3f338041fda534259
-      BUILD_NUMBER: '119'
+      SOURCE_COMMIT: 5c422162a821102bf24273386a55d239497124ad
+      BUILD_NUMBER: '120'
       MARKETING_VERSION: '1.6'
       DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
       CI: 'true'
@@ -108,10 +108,11 @@ jobs:
           fi
           if bash --noprofile --norc -e -u -o pipefail <<'PRIVATE_BUILD_STEP' >> "$RUNNER_TEMP/colorbestie-private-build.log" 2>&1
           set -euo pipefail
-          test "$BUILD_NUMBER" = 119
-          test "$SOURCE_COMMIT" = 21fea20f02cf6996a8a05ff3f338041fda534259
+          test "$BUILD_NUMBER" = 120
+          test "$SOURCE_COMMIT" = 5c422162a821102bf24273386a55d239497124ad
           test "$PRODUCTION_URL" = https://colorbestie.app
           test "$MARKETING_VERSION" = 1.6
+          test "$(shasum -a 256 ios/App/App/Assets.xcassets/AppIcon.appiconset/AppIcon-512@2x.png | awk '{print $1}')" = '30af857b155e4052dee2cecf8142138316f5a12f2e1d2d076f13e65c68514e0b'
           [[ "$ASC_KEY_ID" =~ ^[A-Z0-9]{10}$ && "$APPLE_TEAM_ID" =~ ^[A-Z0-9]{10}$ ]]
           [[ "$ASC_ISSUER_ID" =~ ^[[:xdigit:]]{8}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{12}$ ]]
           test "$HAS_ASC_PRIVATE_KEY" = true
@@ -310,6 +311,10 @@ jobs:
           with (app / 'GoogleService-Info.plist').open('rb') as source:
               assert plistlib.load(source)['BUNDLE_ID'] == 'com.colorbestie.app'
           PY
+          python3 "$GITHUB_WORKSPACE/scripts/verify-app-icon.py" \
+            ios/App/App/Assets.xcassets/AppIcon.appiconset/AppIcon-512@2x.png \
+            "$build_dir/ColorBestie.xcarchive/Products/Applications/App.app" \
+            "$build_dir/public-icon-proof"
           python3 <<'PY'
           import os, pathlib, plistlib
           path = pathlib.Path(os.environ['RUNNER_TEMP']) / 'colorbestie-app-store' / 'ExportOptions.plist'
@@ -334,6 +339,32 @@ jobs:
             fi
             exit 1
           fi
+      - name: Emit verified public icon inspection bundle
+        working-directory: .
+        run: |
+          set +x
+          set -euo pipefail
+          python3 <<'PY'
+          import base64, gzip, hashlib, json, os, pathlib
+          folder = pathlib.Path(os.environ['RUNNER_TEMP']) / 'colorbestie-app-store/public-icon-proof'
+          proof = json.loads((folder / 'proof.json').read_text())
+          assert proof['passed'] is True
+          assert proof['approvedSourceSha256'] == '30af857b155e4052dee2cecf8142138316f5a12f2e1d2d076f13e65c68514e0b'
+          assert proof['sourceCommit'] == os.environ['SOURCE_COMMIT']
+          assert proof['build'] == '120'
+          assert {icon['file'] for icon in proof['icons']} == {'iPhone-120.png', 'iPad-152.png'}
+          images = {}
+          for icon in proof['icons']:
+              data = (folder / icon['file']).read_bytes()
+              assert data.startswith(b'\x89PNG\r\n\x1a\n') and len(data) < 256000
+              assert hashlib.sha256(data).hexdigest() == icon['pngSha256']
+              images[icon['file']] = base64.b64encode(data).decode()
+          payload = base64.b64encode(gzip.compress(json.dumps({'proof': proof, 'images': images}).encode(), mtime=0)).decode()
+          print('BEGIN_COLORBESTIE_PUBLIC_ICON_PROOF_V1')
+          for start in range(0, len(payload), 120):
+              print(payload[start:start + 120])
+          print('END_COLORBESTIE_PUBLIC_ICON_PROOF_V1')
+          PY
       - name: Remove private source and temporary output
         if: ${{ always() }}
         working-directory: .
