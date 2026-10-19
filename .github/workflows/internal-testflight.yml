@@ -19,8 +19,8 @@ jobs:
         working-directory: app
     env:
       STAGING_URL: https://colorbestie-staging-android-billing.onrender.com
-      SOURCE_COMMIT: d43ce5b47c0d78636cf6bd6c3803923d5acd3d4b
-      BUILD_NUMBER: '117'
+      SOURCE_COMMIT: 998cfb6e67dd94a1ffc4752b042b9ee26081ede3
+      BUILD_NUMBER: '118'
       MARKETING_VERSION: '1.6'
       DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
       CI: 'true'
@@ -276,6 +276,10 @@ jobs:
           }
           const builds = await read(`builds?filter[app]=6761053389&filter[version]=${encodeURIComponent(process.env.BUILD_NUMBER)}&limit=1`);
           if (builds.length) throw new Error('Build number already exists; choose another unused number');
+          const uploadAttempts = await read('apps/6761053389/buildUploads?limit=20&fields[buildUploads]=cfBundleVersion,state');
+          if (uploadAttempts.some(item => item.attributes.cfBundleVersion === process.env.BUILD_NUMBER)) {
+            throw new Error('Build number was already uploaded; choose another unused number');
+          }
           const latest = await read('builds?filter[app]=6761053389&sort=-uploadedDate&limit=1');
           if (latest.some(item => Number(item.attributes.version) >= Number(process.env.BUILD_NUMBER))) {
             throw new Error('Build number must exceed the latest uploaded build');
@@ -310,6 +314,8 @@ jobs:
           with (app / 'Info.plist').open('rb') as source:
               info = plistlib.load(source)
           assert info['CFBundleIdentifier'] == 'com.colorbestie.app'
+          assert info['NSPhotoLibraryUsageDescription'].strip()
+          assert info['NSPhotoLibraryAddUsageDescription'].strip()
           assert info['CFBundleVersion'] == os.environ['BUILD_NUMBER']
           assert info['CFBundleShortVersionString'] == os.environ['MARKETING_VERSION']
           with (app / 'capacitor.config.json').open() as source:

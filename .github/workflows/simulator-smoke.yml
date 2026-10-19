@@ -10,14 +10,14 @@ jobs:
   simulator:
     if: ${{ github.event_name == 'workflow_dispatch' && github.event.repository.private == false && github.repository == 'joost-heijden/colorbestie-ios-build' && github.ref == 'refs/heads/main' && github.actor == 'joost-heijden' }}
     runs-on: macos-26
-    timeout-minutes: 25
+    timeout-minutes: 35
     defaults:
       run:
         shell: bash
         working-directory: app
     env:
       STAGING_URL: https://colorbestie-staging-android-billing.onrender.com
-      SOURCE_COMMIT: d43ce5b47c0d78636cf6bd6c3803923d5acd3d4b
+      SOURCE_COMMIT: 998cfb6e67dd94a1ffc4752b042b9ee26081ede3
       DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
       CI: 'true'
       COCOAPODS_DISABLE_STATS: 'true'
@@ -220,7 +220,8 @@ jobs:
             exit 1
           fi
       - name: Compile install and launch the iPhone simulator
-        timeout-minutes: 12
+        id: simulator_smoke
+        timeout-minutes: 20
         run: |
           set +x
           set -euo pipefail
@@ -255,7 +256,10 @@ jobs:
           import json, os, pathlib, plistlib
           app = pathlib.Path(os.environ['SIMULATOR_APP'])
           with (app / 'Info.plist').open('rb') as source:
-              assert plistlib.load(source)['CFBundleIdentifier'] == 'com.colorbestie.app'
+              info = plistlib.load(source)
+              assert info['CFBundleIdentifier'] == 'com.colorbestie.app'
+              assert info['NSPhotoLibraryUsageDescription'].strip()
+              assert info['NSPhotoLibraryAddUsageDescription'].strip()
           with (app / 'capacitor.config.json').open() as source:
               config = json.load(source)
           assert config['appId'] == 'com.colorbestie.app'
@@ -294,9 +298,16 @@ jobs:
         if: ${{ always() }}
         working-directory: .
         timeout-minutes: 2
+        env:
+          SIMULATOR_SMOKE_OUTCOME: ${{ steps.simulator_smoke.outcome }}
         run: |
           set +x
           set -euo pipefail
+          if test "${SIMULATOR_SMOKE_OUTCOME:-}" = failure && test -f "$RUNNER_TEMP/colorbestie-private-build.log"; then
+            if ! DIAGNOSTIC_PHASE='Simulator failure or timeout before cleanup' node "$GITHUB_WORKSPACE/scripts/encrypt-diagnostic.mjs" "$RUNNER_TEMP/colorbestie-private-build.log" "$GITHUB_WORKSPACE/diagnostics-public-key.pem"; then
+              echo '::error::Encrypted simulator diagnostics unavailable; raw output remains withheld.'
+            fi
+          fi
           if test -f "$RUNNER_TEMP/colorbestie-sim.udid"; then
             sim_id="$(cat "$RUNNER_TEMP/colorbestie-sim.udid")"
             if [[ "$sim_id" =~ ^[[:xdigit:]]{8}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{12}$ ]]; then
