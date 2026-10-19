@@ -16,8 +16,8 @@ jobs:
         shell: bash
         working-directory: app
     env:
-      STAGING_URL: https://colorbestie.app
-      SOURCE_COMMIT: 0a637f1e07becfe1f89bea6ac2ed67c52c6eea9c
+      STAGING_URL: http://localhost:4319/?nativeTest=ios
+      SOURCE_COMMIT: abca60f0420783021f79fc0e63b648cf596cabd1
       DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
       CI: 'true'
       COCOAPODS_DISABLE_STATS: 'true'
@@ -98,7 +98,7 @@ jobs:
           fi
           if bash --noprofile --norc -e -u -o pipefail <<'PRIVATE_BUILD_STEP' >> "$RUNNER_TEMP/colorbestie-private-build.log" 2>&1
           set -euo pipefail
-          test "$STAGING_URL" = 'https://colorbestie.app'
+          test "$STAGING_URL" = 'http://localhost:4319/?nativeTest=ios'
           test -f ios/App/Podfile
           test -f ios/App/App.xcodeproj/project.pbxproj
           test -f ios/App/App/GoogleService-Info.plist
@@ -155,8 +155,32 @@ jobs:
           if (source.split(original).length !== 2 || !source.includes('appId: "com.colorbestie.app"')) {
             throw new Error('Unexpected native app ID or server configuration');
           }
-          writeFileSync(file, source.replace(original, `url: ${JSON.stringify(process.env.STAGING_URL)}`));
+          writeFileSync(file, source.replace(original, `url: ${JSON.stringify(process.env.STAGING_URL)}`).replace("cleartext: false", "cleartext: true"));
           NODE
+          # Local test server only: never use a customer account or payment backend.
+          cp ios/App/App/Info.plist "$RUNNER_TEMP/colorbestie-testflight/Info.plist"
+          python3 <<'PY'
+          import pathlib, plistlib
+          path = pathlib.Path('ios/App/App/Info.plist')
+          with path.open('rb') as source:
+              info = plistlib.load(source)
+          info['NSAppTransportSecurity'] = {'NSAllowsLocalNetworking': True, 'NSAllowsArbitraryLoadsInWebContent': True}
+          with path.open('wb') as target:
+              plistlib.dump(info, target)
+          PY
+          node scripts/book-scan-fixture.cjs
+          node scripts/verify-book-scan.cjs >> "$RUNNER_TEMP/colorbestie-private-build.log" 2>&1 &
+          echo "$!" > "$RUNNER_TEMP/colorbestie-scan-server.pid"
+          ready=false
+          for second in {1..90}; do
+            if curl --silent --fail --max-time 2 http://localhost:4319/test/native-result >/dev/null; then
+              ready=true
+              break
+            fi
+            sleep 1
+          done
+          test "$ready" = true
+
           PRIVATE_BUILD_STEP
           then
             echo 'Point only this temporary checkout at isolated staging: complete.'
@@ -204,7 +228,7 @@ jobs:
           const config = JSON.parse(readFileSync('ios/App/App/capacitor.config.json', 'utf8'));
           assert.equal(config.appId, 'com.colorbestie.app');
           assert.equal(config.server.url, process.env.STAGING_URL);
-          assert.equal(config.server.cleartext, false);
+          assert.equal(config.server.cleartext, true);
           NODE
           PRIVATE_BUILD_STEP
           then
@@ -262,7 +286,7 @@ jobs:
               config = json.load(source)
           assert config['appId'] == 'com.colorbestie.app'
           assert config['server']['url'] == os.environ['STAGING_URL']
-          assert config['server']['cleartext'] is False
+          assert config['server']['cleartext'] is True
           with (app / 'GoogleService-Info.plist').open('rb') as source:
               assert plistlib.load(source)['BUNDLE_ID'] == 'com.colorbestie.app'
           PY
@@ -281,6 +305,29 @@ jobs:
             esac
             sleep 1
           done
+
+          for second in {1..90}; do
+            curl --silent --show-error --max-time 3 http://localhost:4319/test/native-result > "$RUNNER_TEMP/colorbestie-scan-result.json"
+            if ! grep -qx null "$RUNNER_TEMP/colorbestie-scan-result.json"; then
+              break
+            fi
+            sleep 1
+          done
+          export SCAN_RESULT_PATH="$RUNNER_TEMP/colorbestie-scan-result.json"
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import { readFileSync } from 'node:fs';
+          const result = JSON.parse(readFileSync(process.env.SCAN_RESULT_PATH, 'utf8'));
+          assert.equal(result?.success, true, JSON.stringify(result));
+          assert.equal(result.platform, 'ios');
+          assert.ok(result.nativePermissionRead && typeof result.nativePermissionRead.camera === 'string');
+          assert.equal(result.simulatedCameraDenial, true);
+          assert.equal(result.isbn13, '9781780671062');
+          assert.equal(result.author, 'Johanna Basford');
+          assert.equal(result.pageCount, 96);
+          assert.equal(result.source, 'open_library');
+          console.log('iOS WKWebView: native permission read, simulated denial, barcode-photo decoding, live book lookup and isolated save passed.');
+          NODE
           xcrun simctl terminate "$sim_id" com.colorbestie.app
           PRIVATE_BUILD_STEP
           then
@@ -312,6 +359,12 @@ jobs:
               xcrun simctl shutdown "$sim_id" >/dev/null 2>&1 || true
             fi
           fi
+
+          if test -f "$RUNNER_TEMP/colorbestie-scan-server.pid"; then
+            server_pid="$(cat "$RUNNER_TEMP/colorbestie-scan-server.pid")"
+            if [[ "$server_pid" =~ ^[1-9][0-9]*$ ]]; then kill "$server_pid" 2>/dev/null || true; fi
+          fi
+          rm -f "$RUNNER_TEMP/colorbestie-scan-server.pid" "$RUNNER_TEMP/colorbestie-scan-result.json"
           rm -rf "$GITHUB_WORKSPACE/app" "$RUNNER_TEMP/colorbestie-source-auth" "$RUNNER_TEMP/colorbestie-sim"
           rm -f "$RUNNER_TEMP/colorbestie-sim.udid" "$RUNNER_TEMP/colorbestie-private-build.log"
           echo 'Private source and temporary simulator output removed.'
