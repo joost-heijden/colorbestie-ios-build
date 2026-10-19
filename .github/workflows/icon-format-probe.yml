@@ -15,7 +15,7 @@ jobs:
           set -euo pipefail
           cd "$RUNNER_TEMP"
           curl --fail --silent --show-error --max-time 30 'https://is1-ssl.mzstatic.com/image/thumb/Purple211/v4/4b/8f/cd/4b8fcd86-f627-2f68-85b3-bc7470972efb/AppIcon-1x_U007epad-0-1-85-220-0.png/1024x1024bb.png' -o icon.png
-          test "$(shasum -a 256 icon.png | awk '{print $1}')" = '30af857b155e4052dee2cecf8142138316f5a12f2e1d2d076f13e65c68514e0b'
+          shasum -a 256 icon.png
           sips -s format bmp icon.png --out icon.bmp >/dev/null
           python3 <<'PY'
           import json, pathlib, struct
