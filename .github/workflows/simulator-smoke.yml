@@ -1,0 +1,308 @@
+name: ColorBestie iPhone simulator smoke test
+'on':
+  workflow_dispatch: {}
+permissions:
+  contents: read
+concurrency:
+  group: colorbestie-ios-simulator-smoke
+  cancel-in-progress: false
+jobs:
+  simulator:
+    if: ${{ github.event_name == 'workflow_dispatch' && github.event.repository.private == false && github.repository == 'joost-heijden/colorbestie-ios-build' && github.ref == 'refs/heads/main' && github.actor == 'joost-heijden' }}
+    runs-on: macos-26
+    timeout-minutes: 25
+    defaults:
+      run:
+        shell: bash
+        working-directory: app
+    env:
+      STAGING_URL: https://colorbestie-staging-android-billing.onrender.com
+      SOURCE_COMMIT: d43ce5b47c0d78636cf6bd6c3803923d5acd3d4b
+      DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
+      CI: 'true'
+      COCOAPODS_DISABLE_STATS: 'true'
+    steps:
+      - name: Check out public build recipe
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Validate diagnostic encryption before private checkout
+        working-directory: .
+        run: |
+          set +x
+          set -euo pipefail
+          if test "${RUNNER_DEBUG:-}" = 1; then
+            echo '::error::Debug logging is disabled for private-source builds.'
+            exit 1
+          fi
+          node --input-type=module <<'NODE'
+          import { readFileSync } from 'node:fs';
+          import { createPublicKey } from 'node:crypto';
+          const key = createPublicKey(readFileSync('diagnostics-public-key.pem'));
+          if (key.asymmetricKeyType !== 'rsa' || key.asymmetricKeyDetails.modulusLength < 3072) throw new Error('A diagnostics RSA public key of at least 3072 bits is required');
+          NODE
+          echo 'Encrypted failure diagnostics ready.'
+      - name: Fetch pinned private application source
+        working-directory: .
+        env:
+          SOURCE_REPOSITORY: ${{ secrets.SOURCE_REPOSITORY }}
+          SOURCE_SSH_KEY: ${{ secrets.SOURCE_SSH_KEY }}
+        run: |
+          set +x
+          set -euo pipefail
+          if test "${RUNNER_DEBUG:-}" = 1; then
+            echo '::error::Debug logging is disabled for private-source builds.'
+            exit 1
+          fi
+          if bash --noprofile --norc -e -u -o pipefail <<'PRIVATE_BUILD_STEP' >> "$RUNNER_TEMP/colorbestie-private-build.log" 2>&1
+          set -euo pipefail
+          [[ "$SOURCE_REPOSITORY" =~ ^git@github\.com:[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\.git$ ]]
+          [[ "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+          test -n "$SOURCE_SSH_KEY"
+          umask 077
+          source_auth="$RUNNER_TEMP/colorbestie-source-auth"
+          mkdir -p "$source_auth"
+          trap 'rm -rf "$source_auth"' EXIT
+          printf '%s\n' "$SOURCE_SSH_KEY" > "$source_auth/key"
+          unset SOURCE_SSH_KEY
+          export SOURCE_AUTH_DIR="$source_auth"
+          cp "$GITHUB_WORKSPACE/github-known-hosts" "$source_auth/known_hosts"
+          test "$(ssh-keygen -lf "$source_auth/known_hosts" | awk '{print $2}')" = 'SHA256:+DiY3wvvV6TuJJhbpZisF/zLDA0zPMSvHdkr4UvCOqU'
+          export GIT_SSH_COMMAND="ssh -i '$source_auth/key' -o BatchMode=yes -o ConnectTimeout=30 -o ConnectionAttempts=1 -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile='$source_auth/known_hosts'"
+          git init --quiet app
+          git -C app fetch --quiet --depth=1 "$SOURCE_REPOSITORY" "$SOURCE_COMMIT"
+          git -C app -c advice.detachedHead=false checkout --quiet --detach FETCH_HEAD
+          test "$(git -C app rev-parse HEAD)" = "$SOURCE_COMMIT"
+          # Do not retain private history or Git credentials while dependencies execute.
+          rm -rf app/.git
+          PRIVATE_BUILD_STEP
+          then
+            echo 'Fetch pinned private application source: complete.'
+          else
+            echo '::error::Fetch pinned private application source failed. Private diagnostic output has been withheld.'
+            if ! DIAGNOSTIC_PHASE='Fetch pinned private application source' node "$GITHUB_WORKSPACE/scripts/encrypt-diagnostic.mjs" "$RUNNER_TEMP/colorbestie-private-build.log" "$GITHUB_WORKSPACE/diagnostics-public-key.pem"; then
+              echo '::error::Encrypted diagnostics could not be generated; raw output remains withheld.'
+            fi
+            exit 1
+          fi
+      - name: Validate isolated backend and simulator inputs
+        run: |
+          set +x
+          set -euo pipefail
+          if test "${RUNNER_DEBUG:-}" = 1; then
+            echo '::error::Debug logging is disabled for private-source builds.'
+            exit 1
+          fi
+          if bash --noprofile --norc -e -u -o pipefail <<'PRIVATE_BUILD_STEP' >> "$RUNNER_TEMP/colorbestie-private-build.log" 2>&1
+          set -euo pipefail
+          test "$STAGING_URL" = 'https://colorbestie-staging-android-billing.onrender.com'
+          test -f ios/App/Podfile
+          test -f ios/App/App.xcodeproj/project.pbxproj
+          test -f ios/App/App/GoogleService-Info.plist
+          test -f lib/apple-trial-paid-start.ts
+          xcodebuild -version
+          sdk_version="$(xcrun --sdk iphonesimulator --show-sdk-version)"
+          test "${sdk_version%%.*}" -ge 26
+          status="$(curl --silent --show-error --max-time 45 --output /dev/null --write-out '%{http_code}' "$STAGING_URL/api/revenuecat/apple-trial-start")"
+          test "$status" = 401
+          PRIVATE_BUILD_STEP
+          then
+            echo 'Validate isolated backend and simulator inputs: complete.'
+          else
+            echo '::error::Validate isolated backend and simulator inputs failed. Private diagnostic output has been withheld.'
+            if ! DIAGNOSTIC_PHASE='Validate isolated backend and simulator inputs' node "$GITHUB_WORKSPACE/scripts/encrypt-diagnostic.mjs" "$RUNNER_TEMP/colorbestie-private-build.log" "$GITHUB_WORKSPACE/diagnostics-public-key.pem"; then
+              echo '::error::Encrypted diagnostics could not be generated; raw output remains withheld.'
+            fi
+            exit 1
+          fi
+      - name: Install locked JavaScript dependencies
+        run: |
+          set +x
+          set -euo pipefail
+          if test "${RUNNER_DEBUG:-}" = 1; then
+            echo '::error::Debug logging is disabled for private-source builds.'
+            exit 1
+          fi
+          if bash --noprofile --norc -e -u -o pipefail <<'PRIVATE_BUILD_STEP' >> "$RUNNER_TEMP/colorbestie-private-build.log" 2>&1
+          npm ci --no-audit --no-fund
+          PRIVATE_BUILD_STEP
+          then
+            echo 'Install locked JavaScript dependencies: complete.'
+          else
+            echo '::error::Install locked JavaScript dependencies failed. Private diagnostic output has been withheld.'
+            if ! DIAGNOSTIC_PHASE='Install locked JavaScript dependencies' node "$GITHUB_WORKSPACE/scripts/encrypt-diagnostic.mjs" "$RUNNER_TEMP/colorbestie-private-build.log" "$GITHUB_WORKSPACE/diagnostics-public-key.pem"; then
+              echo '::error::Encrypted diagnostics could not be generated; raw output remains withheld.'
+            fi
+            exit 1
+          fi
+      - name: Point only this temporary checkout at isolated staging
+        run: |
+          set +x
+          set -euo pipefail
+          if test "${RUNNER_DEBUG:-}" = 1; then
+            echo '::error::Debug logging is disabled for private-source builds.'
+            exit 1
+          fi
+          if bash --noprofile --norc -e -u -o pipefail <<'PRIVATE_BUILD_STEP' >> "$RUNNER_TEMP/colorbestie-private-build.log" 2>&1
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/colorbestie-testflight"
+          cp capacitor.config.ts "$RUNNER_TEMP/colorbestie-testflight/capacitor.config.ts"
+          node --input-type=module <<'NODE'
+          import { readFileSync, writeFileSync } from 'node:fs';
+          const file = 'capacitor.config.ts';
+          const source = readFileSync(file, 'utf8');
+          const original = 'url: "https://colorbestie.app"';
+          if (source.split(original).length !== 2 || !source.includes('appId: "com.colorbestie.app"')) {
+            throw new Error('Unexpected native app ID or server configuration');
+          }
+          writeFileSync(file, source.replace(original, `url: ${JSON.stringify(process.env.STAGING_URL)}`));
+          NODE
+          PRIVATE_BUILD_STEP
+          then
+            echo 'Point only this temporary checkout at isolated staging: complete.'
+          else
+            echo '::error::Point only this temporary checkout at isolated staging failed. Private diagnostic output has been withheld.'
+            if ! DIAGNOSTIC_PHASE='Point only this temporary checkout at isolated staging' node "$GITHUB_WORKSPACE/scripts/encrypt-diagnostic.mjs" "$RUNNER_TEMP/colorbestie-private-build.log" "$GITHUB_WORKSPACE/diagnostics-public-key.pem"; then
+              echo '::error::Encrypted diagnostics could not be generated; raw output remains withheld.'
+            fi
+            exit 1
+          fi
+      - name: Synchronize the existing CocoaPods iOS project
+        run: |
+          set +x
+          set -euo pipefail
+          if test "${RUNNER_DEBUG:-}" = 1; then
+            echo '::error::Debug logging is disabled for private-source builds.'
+            exit 1
+          fi
+          if bash --noprofile --norc -e -u -o pipefail <<'PRIVATE_BUILD_STEP' >> "$RUNNER_TEMP/colorbestie-private-build.log" 2>&1
+          set -euo pipefail
+          pod --version
+          npx --no-install cap sync ios
+          # CocoaPods creates this workspace; it is not recreated with cap add.
+          test -f ios/App/App.xcworkspace/contents.xcworkspacedata
+          # The repository has an App target, but no checked-in shared scheme.
+          ruby -rxcodeproj <<'RUBY'
+          path = 'ios/App/App.xcodeproj'
+          project = Xcodeproj::Project.open(path)
+          target = project.targets.find { |item| item.name == 'App' && item.product_type == 'com.apple.product-type.application' }
+          abort 'Expected App application target' unless target
+          abort 'Unexpected app bundle identifier' unless target.build_configurations.all? { |config| config.build_settings['PRODUCT_BUNDLE_IDENTIFIER'] == 'com.colorbestie.app' }
+          # This tracked file is missing from the old project's resource phase.
+          # FirebaseMessaging configures Firebase on plugin load and needs it.
+          unless target.resources_build_phase.files_references.any? { |ref| ref.path == 'GoogleService-Info.plist' }
+            ref = project.main_group['App'].new_file('GoogleService-Info.plist')
+            target.resources_build_phase.add_file_reference(ref)
+            project.save
+          end
+          project.recreate_user_schemes
+          Xcodeproj::XCScheme.share_scheme(path, 'App')
+          RUBY
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import { readFileSync } from 'node:fs';
+          const config = JSON.parse(readFileSync('ios/App/App/capacitor.config.json', 'utf8'));
+          assert.equal(config.appId, 'com.colorbestie.app');
+          assert.equal(config.server.url, process.env.STAGING_URL);
+          assert.equal(config.server.cleartext, false);
+          NODE
+          PRIVATE_BUILD_STEP
+          then
+            echo 'Synchronize the existing CocoaPods iOS project: complete.'
+          else
+            echo '::error::Synchronize the existing CocoaPods iOS project failed. Private diagnostic output has been withheld.'
+            if ! DIAGNOSTIC_PHASE='Synchronize the existing CocoaPods iOS project' node "$GITHUB_WORKSPACE/scripts/encrypt-diagnostic.mjs" "$RUNNER_TEMP/colorbestie-private-build.log" "$GITHUB_WORKSPACE/diagnostics-public-key.pem"; then
+              echo '::error::Encrypted diagnostics could not be generated; raw output remains withheld.'
+            fi
+            exit 1
+          fi
+      - name: Compile install and launch the iPhone simulator
+        timeout-minutes: 12
+        run: |
+          set +x
+          set -euo pipefail
+          if test "${RUNNER_DEBUG:-}" = 1; then
+            echo '::error::Debug logging is disabled for private-source builds.'
+            exit 1
+          fi
+          if bash --noprofile --norc -e -u -o pipefail <<'PRIVATE_BUILD_STEP' >> "$RUNNER_TEMP/colorbestie-private-build.log" 2>&1
+          set -euo pipefail
+          umask 077
+          sim_id="$(xcrun simctl list devices available --json | node -e '
+          let text = "";
+          process.stdin.on("data", chunk => text += chunk);
+          process.stdin.on("end", () => {
+          const phones = Object.entries(JSON.parse(text).devices)
+            .filter(([runtime]) => runtime.includes(".iOS-"))
+            .flatMap(([, devices]) => devices)
+            .filter(device => device.isAvailable && device.name.startsWith("iPhone"));
+          const device = phones.find(device => device.name === "iPhone 17") || phones[0];
+          if (!device) throw new Error("No available iPhone simulator");
+          process.stdout.write(device.udid);
+          });')"
+          [[ "$sim_id" =~ ^[[:xdigit:]]{8}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{12}$ ]]
+          printf '%s\n' "$sim_id" > "$RUNNER_TEMP/colorbestie-sim.udid"
+          xcrun simctl bootstatus "$sim_id" -b
+          xcodebuild -quiet -workspace ios/App/App.xcworkspace -scheme App \
+            -configuration Debug -destination "platform=iOS Simulator,id=$sim_id" \
+            -derivedDataPath "$RUNNER_TEMP/colorbestie-sim" \
+            -hideShellScriptEnvironment CODE_SIGNING_ALLOWED=NO build
+          export SIMULATOR_APP="$RUNNER_TEMP/colorbestie-sim/Build/Products/Debug-iphonesimulator/App.app"
+          python3 <<'PY'
+          import json, os, pathlib, plistlib
+          app = pathlib.Path(os.environ['SIMULATOR_APP'])
+          with (app / 'Info.plist').open('rb') as source:
+              assert plistlib.load(source)['CFBundleIdentifier'] == 'com.colorbestie.app'
+          with (app / 'capacitor.config.json').open() as source:
+              config = json.load(source)
+          assert config['appId'] == 'com.colorbestie.app'
+          assert config['server']['url'] == os.environ['STAGING_URL']
+          assert config['server']['cleartext'] is False
+          with (app / 'GoogleService-Info.plist').open('rb') as source:
+              assert plistlib.load(source)['BUNDLE_ID'] == 'com.colorbestie.app'
+          PY
+          xcrun simctl install "$sim_id" "$SIMULATOR_APP"
+          result="$(xcrun simctl launch --terminate-running-process "$sim_id" com.colorbestie.app)"
+          pid="${result##*: }"
+          [[ "$pid" =~ ^[1-9][0-9]*$ ]]
+          executable="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$SIMULATOR_APP/Info.plist")"
+          for second in {1..15}; do
+            kill -0 "$pid"
+            state="$(ps -p "$pid" -o stat=)"
+            [[ -n "$state" && "$state" != *Z* ]]
+            case "$(ps -p "$pid" -o comm=)" in
+              *"/App.app/$executable") ;;
+              *) exit 1 ;;
+            esac
+            sleep 1
+          done
+          xcrun simctl terminate "$sim_id" com.colorbestie.app
+          PRIVATE_BUILD_STEP
+          then
+            echo 'Compile install and launch the iPhone simulator: complete.'
+          else
+            echo '::error::Compile install and launch the iPhone simulator failed. Private diagnostic output has been withheld.'
+            if ! DIAGNOSTIC_PHASE='Compile install and launch the iPhone simulator' node "$GITHUB_WORKSPACE/scripts/encrypt-diagnostic.mjs" "$RUNNER_TEMP/colorbestie-private-build.log" "$GITHUB_WORKSPACE/diagnostics-public-key.pem"; then
+              echo '::error::Encrypted diagnostics could not be generated; raw output remains withheld.'
+            fi
+            exit 1
+          fi
+      - name: Remove private source and simulator output
+        if: ${{ always() }}
+        working-directory: .
+        timeout-minutes: 2
+        run: |
+          set +x
+          set -euo pipefail
+          if test -f "$RUNNER_TEMP/colorbestie-sim.udid"; then
+            sim_id="$(cat "$RUNNER_TEMP/colorbestie-sim.udid")"
+            if [[ "$sim_id" =~ ^[[:xdigit:]]{8}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{12}$ ]]; then
+              xcrun simctl shutdown "$sim_id" >/dev/null 2>&1 || true
+            fi
+          fi
+          rm -rf "$GITHUB_WORKSPACE/app" "$RUNNER_TEMP/colorbestie-source-auth" "$RUNNER_TEMP/colorbestie-sim"
+          rm -f "$RUNNER_TEMP/colorbestie-sim.udid" "$RUNNER_TEMP/colorbestie-private-build.log"
+          echo 'Private source and temporary simulator output removed.'
