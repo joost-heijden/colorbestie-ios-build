@@ -12,7 +12,7 @@ The production recipe targets `https://colorbestie.app` and App Store distributi
 Its approved 1024 icon SHA-256 is `8883ccc02f575e6f1e45b2c41bdf21b158df03bcdf1e54ca22ea4b2a9d559f82`.
 The independent actool/iPhone/iPad archive pixel proof is retained.
 
-Build 121 pins reviewed private source `700b6da1d13d3701853ec1b15a70d1ddcc6a85ba` in both the job environment and its exact comparison guard. The reviewed changes are integrated above the existing production payment code. Production Render and external attribution settings are verified independently before dispatch.
+Build 121 pins reviewed private source `7c24f14cc84239495d61499c1642b53bf98c3e94` in both the job environment and its exact comparison guard. The reviewed changes are integrated above the existing production payment code. Production Render and external attribution settings are verified independently before dispatch.
 
 Source and archived plists must include the Apple ATT purpose, permanently deactivate Firebase Analytics, keep notification auto-init off and disable automatic Facebook SDK initialization/events/advertising-ID collection. Source, CocoaPods target and signed-archive guards verify the custom ATT bridge, framework, request API and storyboard registration. Adapter tests cover denied, interrupted and revoked permission, authorized native events, and purchase/restore behavior. Native browser marketing remains off; iOS uses the permission-gated AppsFlyer client path. Billing files are snapshotted before dependency/build preparation and compared before upload; the recipe does not remove the existing Apple paid-start files or change billing flags. Existing production deployment revision and external attribution settings must be verified separately before dispatch.
 

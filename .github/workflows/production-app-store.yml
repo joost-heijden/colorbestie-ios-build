@@ -19,7 +19,7 @@ jobs:
         working-directory: app
     env:
       PRODUCTION_URL: https://colorbestie.app
-      SOURCE_COMMIT: 700b6da1d13d3701853ec1b15a70d1ddcc6a85ba
+      SOURCE_COMMIT: 7c24f14cc84239495d61499c1642b53bf98c3e94
       BUILD_NUMBER: '121'
       MARKETING_VERSION: '1.6'
       DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
@@ -109,7 +109,7 @@ jobs:
           if bash --noprofile --norc -e -u -o pipefail <<'PRIVATE_BUILD_STEP' >> "$RUNNER_TEMP/colorbestie-private-build.log" 2>&1
           set -euo pipefail
           test "$BUILD_NUMBER" = 121
-          test "$SOURCE_COMMIT" = 700b6da1d13d3701853ec1b15a70d1ddcc6a85ba
+          test "$SOURCE_COMMIT" = 7c24f14cc84239495d61499c1642b53bf98c3e94
           test "$PRODUCTION_URL" = https://colorbestie.app
           test "$MARKETING_VERSION" = 1.6
           test "$(shasum -a 256 ios/App/App/Assets.xcassets/AppIcon.appiconset/AppIcon-512@2x.png | awk '{print $1}')" = '8883ccc02f575e6f1e45b2c41bdf21b158df03bcdf1e54ca22ea4b2a9d559f82'
