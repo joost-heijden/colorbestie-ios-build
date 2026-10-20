@@ -19,8 +19,8 @@ jobs:
         working-directory: app
     env:
       PRODUCTION_URL: https://colorbestie.app
-      SOURCE_COMMIT: 5c422162a821102bf24273386a55d239497124ad
-      BUILD_NUMBER: '120'
+      SOURCE_COMMIT: 700b6da1d13d3701853ec1b15a70d1ddcc6a85ba
+      BUILD_NUMBER: '121'
       MARKETING_VERSION: '1.6'
       DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
       CI: 'true'
@@ -108,19 +108,40 @@ jobs:
           fi
           if bash --noprofile --norc -e -u -o pipefail <<'PRIVATE_BUILD_STEP' >> "$RUNNER_TEMP/colorbestie-private-build.log" 2>&1
           set -euo pipefail
-          test "$BUILD_NUMBER" = 120
-          test "$SOURCE_COMMIT" = 5c422162a821102bf24273386a55d239497124ad
+          test "$BUILD_NUMBER" = 121
+          test "$SOURCE_COMMIT" = 700b6da1d13d3701853ec1b15a70d1ddcc6a85ba
           test "$PRODUCTION_URL" = https://colorbestie.app
           test "$MARKETING_VERSION" = 1.6
-          test "$(shasum -a 256 ios/App/App/Assets.xcassets/AppIcon.appiconset/AppIcon-512@2x.png | awk '{print $1}')" = '30af857b155e4052dee2cecf8142138316f5a12f2e1d2d076f13e65c68514e0b'
+          test "$(shasum -a 256 ios/App/App/Assets.xcassets/AppIcon.appiconset/AppIcon-512@2x.png | awk '{print $1}')" = '8883ccc02f575e6f1e45b2c41bdf21b158df03bcdf1e54ca22ea4b2a9d559f82'
           [[ "$ASC_KEY_ID" =~ ^[A-Z0-9]{10}$ && "$APPLE_TEAM_ID" =~ ^[A-Z0-9]{10}$ ]]
           [[ "$ASC_ISSUER_ID" =~ ^[[:xdigit:]]{8}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{12}$ ]]
           test "$HAS_ASC_PRIVATE_KEY" = true
           test -f ios/App/Podfile
           test -f ios/App/App.xcodeproj/project.pbxproj
           test -f ios/App/App/GoogleService-Info.plist
-          test ! -e lib/apple-trial-paid-start.ts
-          test ! -e app/api/revenuecat/apple-trial-start/route.ts
+          # Preserve the reviewed billing source, including the authorized paid-start update.
+          python3 <<'PY'
+          import hashlib, json, os, pathlib, plistlib, xml.etree.ElementTree as ET
+          root = pathlib.Path('.')
+          info = plistlib.loads((root / 'ios/App/App/Info.plist').read_bytes())
+          assert info.get('FIREBASE_ANALYTICS_COLLECTION_DEACTIVATED') is True
+          assert info.get('FirebaseMessagingAutoInitEnabled') is False
+          assert isinstance(info.get('NSUserTrackingUsageDescription'), str) and info['NSUserTrackingUsageDescription'].strip()
+          for key in ('FacebookAutoInitEnabled', 'FacebookAutoLogAppEventsEnabled', 'FacebookAdvertiserIDCollectionEnabled'):
+              assert info.get(key) is False
+          for name in ('ios/App/App/AppTrackingTransparencyPlugin.swift', 'lib/app-tracking-transparency.ts', 'tests/app-tracking-transparency.test.ts'):
+              assert (root / name).is_file()
+          bridge = ET.parse(root / 'ios/App/App/Base.lproj/Main.storyboard').find('.//viewController')
+          assert bridge is not None and bridge.get('customClass') == 'ColorBestieBridgeViewController' and bridge.get('customModule') == 'App'
+          native = (root / 'ios/App/App/AppTrackingTransparencyPlugin.swift').read_text()
+          assert 'registerPluginInstance(AppTrackingTransparencyPlugin())' in native
+          assert 'ATTrackingManager.requestTrackingAuthorization' in native
+          files = ('lib/revenuecat.ts', 'components/pricing/paywall-client.tsx', 'lib/apple-trial-paid-start.ts', 'app/api/revenuecat/apple-trial-start/route.ts')
+          snapshot = {name: hashlib.sha256((root / name).read_bytes()).hexdigest() if (root / name).exists() else None for name in files}
+          path = pathlib.Path(os.environ['RUNNER_TEMP']) / 'colorbestie-app-store/billing-source-before.json'
+          path.parent.mkdir(parents=True, exist_ok=True)
+          path.write_text(json.dumps(snapshot))
+          PY
           [[ "${RUNNER_DEBUG:-}" != 1 ]]
           xcodebuild -version
           sdk_version="$(xcrun --sdk iphoneos --show-sdk-version)"
@@ -156,6 +177,8 @@ jobs:
           fi
           if bash --noprofile --norc -e -u -o pipefail <<'PRIVATE_BUILD_STEP' >> "$RUNNER_TEMP/colorbestie-private-build.log" 2>&1
           npm ci --no-audit --no-fund
+          # Run the reviewed adapters with native bridge doubles; no store or account calls.
+          node --no-warnings --experimental-strip-types --test tests/ios-native-privacy.test.ts tests/app-tracking-transparency.test.ts
           PRIVATE_BUILD_STEP
           then
             echo 'Install locked JavaScript dependencies: complete.'
@@ -190,6 +213,8 @@ jobs:
           target = project.targets.find { |item| item.name == 'App' && item.product_type == 'com.apple.product-type.application' }
           abort 'Expected App application target' unless target
           abort 'Unexpected app bundle identifier' unless target.build_configurations.all? { |config| config.build_settings['PRODUCT_BUNDLE_IDENTIFIER'] == 'com.colorbestie.app' }
+          abort 'ATT bridge must compile in App' unless target.source_build_phase.files_references.any? { |ref| ref.path == 'AppTrackingTransparencyPlugin.swift' }
+          abort 'ATT OS framework must link in App' unless target.frameworks_build_phase.files_references.any? { |ref| ref.path&.end_with?('AppTrackingTransparency.framework') }
           # This tracked file is missing from the old project's resource phase.
           # FirebaseMessaging configures Firebase on plugin load and needs it.
           unless target.resources_build_phase.files_references.any? { |ref| ref.path == 'GoogleService-Info.plist' }
@@ -290,13 +315,36 @@ jobs:
             "${auth[@]}" archive
           # Check the actual archive before any upload, including copied resources.
           python3 <<'PY'
-          import json, os, pathlib, plistlib
+          import json, os, pathlib, plistlib, subprocess
           app = pathlib.Path(os.environ['RUNNER_TEMP']) / 'colorbestie-app-store/ColorBestie.xcarchive/Products/Applications/App.app'
           with (app / 'Info.plist').open('rb') as source:
               info = plistlib.load(source)
           assert info['CFBundleIdentifier'] == 'com.colorbestie.app'
           with pathlib.Path('ios/App/App/Info.plist').open('rb') as source:
               source_info = plistlib.load(source)
+          for key, expected in (('FIREBASE_ANALYTICS_COLLECTION_DEACTIVATED', True), ('FirebaseMessagingAutoInitEnabled', False), ('FacebookAutoInitEnabled', False), ('FacebookAutoLogAppEventsEnabled', False), ('FacebookAdvertiserIDCollectionEnabled', False)):
+              assert info.get(key) is expected and source_info.get(key) is expected
+          assert isinstance(info.get('NSUserTrackingUsageDescription'), str) and info['NSUserTrackingUsageDescription'].strip()
+          assert info['NSUserTrackingUsageDescription'] == source_info.get('NSUserTrackingUsageDescription')
+          # Prove the archived Mach-O includes the local bridge and the actual Apple ATT call.
+          executable = app / info['CFBundleExecutable']
+          assert executable.is_file() and executable.read_bytes()[:4] in (b'\xcf\xfa\xed\xfe', b'\xfe\xed\xfa\xcf', b'\xca\xfe\xba\xbe', b'\xbe\xba\xfe\xca', b'\xca\xfe\xba\xbf', b'\xbf\xba\xfe\xca')
+          def native_output(tool, *arguments):
+              command = ['/usr/bin/strings'] if tool == 'strings' else ['xcrun', tool]
+              return subprocess.run([*command, *arguments, str(executable)], check=True, capture_output=True, text=True).stdout
+          assert 'AppTrackingTransparencyPlugin' in native_output('nm', '-U')
+          assert 'AppTrackingTransparency.framework/AppTrackingTransparency' in native_output('otool', '-L')
+          strings = native_output('strings', '-a')
+          for token in ('ColorBestieBridgeViewController', 'AppTrackingTransparency', 'requestPermission', 'getStatus', 'startAppsFlyer', 'requestTrackingAuthorizationWithCompletionHandler:'):
+              assert token in strings
+          storyboard = app / 'Base.lproj/Main.storyboardc'
+          assert storyboard.is_dir() and any(b'ColorBestieBridgeViewController' in path.read_bytes() for path in storyboard.rglob('*') if path.is_file())
+          import hashlib
+          snapshot = pathlib.Path(os.environ['RUNNER_TEMP']) / 'colorbestie-app-store/billing-source-before.json'
+          for name, before in json.loads(snapshot.read_text()).items():
+              path = pathlib.Path(name)
+              after = hashlib.sha256(path.read_bytes()).hexdigest() if path.exists() else None
+              assert after == before, 'Build preparation must not modify reviewed billing source'
           for purpose in ('NSCameraUsageDescription', 'NSPhotoLibraryUsageDescription', 'NSPhotoLibraryAddUsageDescription'):
               assert info[purpose].strip()
               assert info[purpose] == source_info[purpose]
@@ -349,9 +397,9 @@ jobs:
           folder = pathlib.Path(os.environ['RUNNER_TEMP']) / 'colorbestie-app-store/public-icon-proof'
           proof = json.loads((folder / 'proof.json').read_text())
           assert proof['passed'] is True
-          assert proof['approvedSourceSha256'] == '30af857b155e4052dee2cecf8142138316f5a12f2e1d2d076f13e65c68514e0b'
+          assert proof['approvedSourceSha256'] == '8883ccc02f575e6f1e45b2c41bdf21b158df03bcdf1e54ca22ea4b2a9d559f82'
           assert proof['sourceCommit'] == os.environ['SOURCE_COMMIT']
-          assert proof['build'] == '120'
+          assert proof['build'] == '121'
           assert {icon['file'] for icon in proof['icons']} == {'iPhone-120.png', 'iPad-152.png'}
           images = {}
           for icon in proof['icons']:

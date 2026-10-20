@@ -9,7 +9,7 @@ import struct
 import subprocess
 import sys
 
-APPROVED = "30af857b155e4052dee2cecf8142138316f5a12f2e1d2d076f13e65c68514e0b"
+APPROVED = "8883ccc02f575e6f1e45b2c41bdf21b158df03bcdf1e54ca22ea4b2a9d559f82"
 source, app, output = map(Path, sys.argv[1:4])
 assert hashlib.sha256(source.read_bytes()).hexdigest() == APPROVED, "AppIcon source is not the approved public icon"
 assert struct.unpack(">II", source.read_bytes()[16:24]) == (1024, 1024)
