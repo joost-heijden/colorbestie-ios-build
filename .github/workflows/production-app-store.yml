@@ -315,7 +315,7 @@ jobs:
             "${auth[@]}" archive
           # Check the actual archive before any upload, including copied resources.
           python3 <<'PY'
-          import json, os, pathlib, plistlib, subprocess
+          import json, os, pathlib, plistlib, re, subprocess
           app = pathlib.Path(os.environ['RUNNER_TEMP']) / 'colorbestie-app-store/ColorBestie.xcarchive/Products/Applications/App.app'
           with (app / 'Info.plist').open('rb') as source:
               info = plistlib.load(source)
@@ -328,17 +328,42 @@ jobs:
           assert info['NSUserTrackingUsageDescription'] == source_info.get('NSUserTrackingUsageDescription')
           # Prove the archived Mach-O includes the local bridge and the actual Apple ATT call.
           executable = app / info['CFBundleExecutable']
-          assert executable.is_file() and executable.read_bytes()[:4] in (b'\xcf\xfa\xed\xfe', b'\xfe\xed\xfa\xcf', b'\xca\xfe\xba\xbe', b'\xbe\xba\xfe\xca', b'\xca\xfe\xba\xbf', b'\xbf\xba\xfe\xca')
+          mach_o = executable.is_file() and executable.read_bytes()[:4] in (b'\xcf\xfa\xed\xfe', b'\xfe\xed\xfa\xcf', b'\xca\xfe\xba\xbe', b'\xbe\xba\xfe\xca', b'\xca\xfe\xba\xbf', b'\xbf\xba\xfe\xca')
+          tool_success = {}
           def native_output(tool, *arguments):
               command = ['/usr/bin/strings'] if tool == 'strings' else ['xcrun', tool]
-              return subprocess.run([*command, *arguments, str(executable)], check=True, capture_output=True, text=True).stdout
-          assert 'AppTrackingTransparencyPlugin' in native_output('nm', '-U')
-          assert 'AppTrackingTransparency.framework/AppTrackingTransparency' in native_output('otool', '-L')
+              key = ' '.join((tool, *arguments))
+              try:
+                  result = subprocess.run([*command, *arguments, str(executable)], capture_output=True, text=True, timeout=60)
+                  tool_success[key] = result.returncode == 0
+                  return result.stdout if result.returncode == 0 else ''
+              except (OSError, subprocess.TimeoutExpired):
+                  tool_success[key] = False
+                  return ''
+          # Release strips Swift linker symbols. Read retained ObjC class_ro_t names instead.
+          objc = native_output('otool', '-ov')
+          class_lists = re.findall(r'^Contents of \([^,\r\n]+,\s*__objc_classlist\) section[^\r\n]*\r?\n(.*?)(?=^Contents of |\Z)', objc, re.M | re.S)
+          runtime_names = {fields[-1] for section in class_lists for line in section.splitlines() if len(fields := line.split()) >= 3 and fields[0] == 'name'}
+          framework_linked = 'AppTrackingTransparency.framework/AppTrackingTransparency' in native_output('otool', '-L')
           strings = native_output('strings', '-a')
-          for token in ('ColorBestieBridgeViewController', 'AppTrackingTransparency', 'requestPermission', 'getStatus', 'startAppsFlyer', 'requestTrackingAuthorizationWithCompletionHandler:'):
-              assert token in strings
           storyboard = app / 'Base.lproj/Main.storyboardc'
-          assert storyboard.is_dir() and any(b'ColorBestieBridgeViewController' in path.read_bytes() for path in storyboard.rglob('*') if path.is_file())
+          native_checks = {
+              'machOExecutable': mach_o,
+              'objcClassListPresent': bool(class_lists),
+              'attPluginRuntimeClassPresent': 'AppTrackingTransparencyPlugin' in runtime_names,
+              'attFrameworkLinked': framework_linked,
+              'compiledBridgeControllerPresent': 'ColorBestieBridgeViewController' in strings,
+              'bridgeMethodsPresent': all(token in strings for token in ('AppTrackingTransparency', 'requestPermission', 'getStatus', 'startAppsFlyer')),
+              'appleAttRequestSelectorPresent': 'requestTrackingAuthorizationWithCompletionHandler:' in strings,
+              'compiledStoryboardBoundToBridge': storyboard.is_dir() and any(b'ColorBestieBridgeViewController' in path.read_bytes() for path in storyboard.rglob('*') if path.is_file()),
+          }
+          diagnostics = {'checks': native_checks, 'unstrippedPluginSymbolVisible': 'AppTrackingTransparencyPlugin' in native_output('nm', '-U'), 'toolsSucceeded': tool_success}
+          proof = pathlib.Path(os.environ['RUNNER_TEMP']) / 'colorbestie-app-store/native-att-archive-proof.private.json'
+          proof.write_text(json.dumps(diagnostics, sort_keys=True))
+          # This entire step is private/encrypted; never emit raw class metadata or strings.
+          print('Native ATT archive checks: ' + json.dumps(diagnostics, sort_keys=True))
+          for check, passed in native_checks.items():
+              assert passed, 'Native ATT archive check failed: ' + check
           import hashlib
           snapshot = pathlib.Path(os.environ['RUNNER_TEMP']) / 'colorbestie-app-store/billing-source-before.json'
           for name, before in json.loads(snapshot.read_text()).items():
